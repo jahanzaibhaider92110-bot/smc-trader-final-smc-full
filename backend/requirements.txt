@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+ccxt
+pandas
+lightgbm
+scikit-learn
+openai
+python-dotenv
+python-multipart
+aiohttp
+requests
+joblib
