@@ -2,12 +2,15 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from datetime import datetime
-import os, json
+import os
+import json
 
-from db import SessionLocal, Signal  
+from db import SessionLocal, Signal
 
+# ✅ FastAPI App Initialize
 app = FastAPI(title="SMC-Trader Pure SMC + ML")
 
+# ✅ CORS Middleware (frontend ke liye)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,6 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ✅ Database Dependency
 def get_db():
     db = SessionLocal()
     try:
@@ -23,6 +27,7 @@ def get_db():
         db.close()
 
 
+# ✅ Signals Endpoint
 @app.get("/signals")
 def get_signals(symbol: str = "BTC/USDT", timeframe: str = "1m", db: Session = Depends(get_db)):
     sig = db.query(Signal).order_by(Signal.created_at.desc()).first()
@@ -33,11 +38,12 @@ def get_signals(symbol: str = "BTC/USDT", timeframe: str = "1m", db: Session = D
                 "label": sig.side or "-",
                 "reason": sig.explanation or "-",
                 "ml_label": sig.raw.get("ml_label") if sig.raw else "-",
-                "ml_confidence": sig.confidence if sig.confidence else "-",
+                "ml_confidence": sig.raw.get("ml_confidence") if sig.raw else "-",
                 "created_at": sig.created_at.isoformat() if sig.created_at else "-"
             }
         }
 
+    # ✅ Fallback agar DB empty hai
     if os.path.exists("predictions/signal.json"):
         with open("predictions/signal.json", "r") as f:
             data = json.load(f)

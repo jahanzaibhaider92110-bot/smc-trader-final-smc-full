@@ -1,13 +1,22 @@
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from datetime import datetime
 import os
 from dotenv import load_dotenv
+
 load_dotenv()
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./smc_trader.db")
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
 class Signal(Base):
     __tablename__ = "signals"
     id = Column(Integer, primary_key=True, index=True)
@@ -21,7 +30,8 @@ class Signal(Base):
     confidence = Column(Float)
     explanation = Column(String)
     raw = Column(JSON)
-    created_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)   # ✅ default fix
+
 class Execution(Base):
     __tablename__ = "executions"
     id = Column(Integer, primary_key=True, index=True)
@@ -29,6 +39,7 @@ class Execution(Base):
     status = Column(String)
     price = Column(Float)
     size = Column(Float)
-    created_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)   # ✅ consistency
+
 def init_db():
     Base.metadata.create_all(bind=engine)
