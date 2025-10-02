@@ -1,3 +1,4 @@
+
 """
 Backtest runner for SMC engine
 """
@@ -16,7 +17,7 @@ from smc.smc_engine import generate_signal
 # -------------------------------
 # Binance se candles fetch karna
 # -------------------------------
-def fetch_binance_data(symbol="BTC/USDT", timeframe="5m", limit=500):
+def fetch_binance_data(symbol="BTC/USDT", timeframe="5m", limit=2000):
     exchange = ccxt.binance()
     print(f"⏳ Fetching {symbol} {timeframe} candles from Binance...")
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -43,7 +44,7 @@ def filter_trades(trades, min_tp=150):
 # -------------------------------
 # Backtest runner
 # -------------------------------
-def run_backtest(symbol="BTC/USDT", timeframe="5m", limit=500):
+def run_backtest(symbol="BTC/USDT", timeframe="5m", limit=2000):
     df = fetch_binance_data(symbol, timeframe, limit)
 
     trades = []
@@ -75,4 +76,4 @@ def run_backtest(symbol="BTC/USDT", timeframe="5m", limit=500):
 # Main
 # -------------------------------
 if __name__ == "__main__":
-    run_backtest("BTC/USDT", "5m", limit=500)
+    run_backtest("BTC/USDT", "5m", limit=2000)
