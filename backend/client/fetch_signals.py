@@ -25,9 +25,3 @@ def fetch_signal():
             print("⚠️ Error:", r.text)
     except Exception as e:
         print("❌ Exception:", e)
-
-if __name__ == "__main__":
-    print("🔄 Starting live signal fetcher (updates every 10 sec)...\n")
-    while True:
-        fetch_signal()
-        time.sleep(10)  # wait 10s before next request
