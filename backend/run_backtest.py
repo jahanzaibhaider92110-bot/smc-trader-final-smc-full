@@ -1,79 +1,99 @@
-
-"""
-Backtest runner for SMC engine
-"""
-
+# path: backend/run_backtest.py
 import pandas as pd
-import ccxt
-import sys
-from pathlib import Path
+import math
+from db import SessionLocal, Signal
+from datetime import datetime
 
-# Add backend folder to Python path
-sys.path.append(str(Path(__file__).resolve().parent))
+def run_backtest_from_db(price_df_path="data/btc_5m.parquet"):
+    # load price series
+    price_df = pd.read_parquet(price_df_path)
+    price_df['timestamp'] = pd.to_datetime(price_df['ts'] if 'ts' in price_df.columns else price_df.get('timestamp', price_df.index))
+    price_df = price_df.sort_values('timestamp').reset_index(drop=True)
 
-from smc.smc_engine import generate_signal
+    db = SessionLocal()
+    try:
+        signals = db.query(Signal).order_by(Signal.created_at).all()
+    finally:
+        db.close()
 
-
-# -------------------------------
-# Binance se candles fetch karna
-# -------------------------------
-def fetch_binance_data(symbol="BTC/USDT", timeframe="5m", limit=2000):
-    exchange = ccxt.binance()
-    print(f"⏳ Fetching {symbol} {timeframe} candles from Binance...")
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    print(f"✅ Got {len(df)} candles")
-    return df
-
-
-# -------------------------------
-# Filter trades with TP >= 150
-# -------------------------------
-def filter_trades(trades, min_tp=150):
-    filtered = []
-    for t in trades:
-        if t.get("signal") in ["buy", "sell"] and t.get("take_profits"):
-            tp_points = abs(t["take_profits"][0] - t["entry"])
-            if tp_points >= min_tp:
-                t["profit"] = tp_points
-                filtered.append(t)
-    return filtered
-
-
-# -------------------------------
-# Backtest runner
-# -------------------------------
-def run_backtest(symbol="BTC/USDT", timeframe="5m", limit=2000):
-    df = fetch_binance_data(symbol, timeframe, limit)
+    if not signals:
+        print("No signals to backtest.")
+        return
 
     trades = []
-    print("🔍 Generating signals...")
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    wins = 0
+    losses = 0
+    rr_sum = 0.0
+    for s in signals:
+        entry = float(s.entry)
+        sl = float(s.stop_loss)
+        tp = float(s.take_profit)
+        side = s.side
+        # find the index after signal time
+        future = price_df[price_df['timestamp'] > s.created_at]
+        hit = None
+        for _, c in future.iterrows():
+            if side == "BUY":
+                if c['low'] <= sl:
+                    hit = ("SL", sl, c['timestamp'])
+                    break
+                if c['high'] >= tp:
+                    hit = ("TP", tp, c['timestamp'])
+                    break
+            else:
+                if c['high'] >= sl:
+                    hit = ("SL", sl, c['timestamp'])
+                    break
+                if c['low'] <= tp:
+                    hit = ("TP", tp, c['timestamp'])
+                    break
+        if hit:
+            outcome = hit[0]
+            exit_price = hit[1]
+        else:
+            # if not hit, use last close in future window or skip
+            if len(future) > 0:
+                exit_price = future.iloc[-1]['close']
+                outcome = "NONE"
+            else:
+                exit_price = price_df.iloc[-1]['close']
+                outcome = "NONE"
 
-    for i in range(200, len(df)):  # skip first 200 for EMA warmup
-        window = df.iloc[: i + 1]
-        try:
-            sig = generate_signal(window)
-            if sig and sig["signal"] in ["buy", "sell"] and sig.get("entry"):
-                sig["index"] = i
-                trades.append(sig)
-        except Exception as e:
-            print(f"⚠️ Error at index {i}: {e}")
+        pnl = (exit_price - entry) if side == "BUY" else (entry - exit_price)
+        trades.append({"id": s.id, "outcome": outcome, "pnl": pnl, "rr": s.rr, "reason": s.reason})
+        equity += pnl
+        peak = max(peak, equity)
+        drawdown = peak - equity
+        max_dd = max(max_dd, drawdown)
+        if outcome == "TP":
+            wins += 1
+        elif outcome == "SL":
+            losses += 1
+        rr_sum += (s.rr or 0)
 
-    # Filter valid trades
-    trades = filter_trades(trades)
+    total = len(trades)
+    winrate = wins / total if total > 0 else 0
+    avg_rr = rr_sum / total if total > 0 else 0
+    avg_pnl = sum(t['pnl'] for t in trades) / total if total > 0 else 0
+    expectancy = (avg_pnl)  # simplification; can be refined
 
-    # Summary
-    print(f"\n📊 Backtest finished")
-    print(f"Total trades: {len(trades)}")
-    if trades:
-        df_trades = pd.DataFrame(trades)
-        df_trades.to_csv("backtest_results.csv", index=False)
-        print("✅ Saved results to backtest_results.csv")
+    report = {
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "winrate": winrate,
+        "avg_rr": avg_rr,
+        "total_pnl": sum(t['pnl'] for t in trades),
+        "max_drawdown": max_dd,
+        "expectancy": expectancy,
+    }
+    print("Backtest Report:", report)
+    pd.DataFrame(trades).to_csv("backtest_trades.csv", index=False)
+    print("Saved trades -> backtest_trades.csv")
+    return report
 
-
-# -------------------------------
-# Main
-# -------------------------------
 if __name__ == "__main__":
-    run_backtest("BTC/USDT", "5m", limit=2000)
+    run_backtest_from_db()

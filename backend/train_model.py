@@ -1,58 +1,73 @@
-"""
-train_model.py
-Train an ML model on SMC rule-engine labeled data.
-"""
+
+# retrain_model.py
 
 import pandas as pd
-import joblib
+import ccxt
+import pickle
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 
-from scripts.label_data import label_df  # reuse your labeling
+# ------------------------------
+# ATR Calculation Helper
+# ------------------------------
+def atr(df, period=14):
+    df["h-l"] = df["high"] - df["low"]
+    df["h-c"] = abs(df["high"] - df["close"].shift())
+    df["l-c"] = abs(df["low"] - df["close"].shift())
+    tr = df[["h-l", "h-c", "l-c"]].max(axis=1)
+    return tr.rolling(period).mean().iloc[-1]
 
-# ==== Step 1: Load data ====
-df = pd.read_parquet("data/btc_1h.parquet")
-df = df.sort_values("ts").reset_index(drop=True)
+# ------------------------------
+# Data Fetch
+# ------------------------------
+exchange = ccxt.binance()
+symbol = "BTC/USDT"
+timeframe = "5m"
 
-# ==== Step 2: Create labels using your rule-engine ====
-labeled = label_df(df)
-print("Sample labeled data:\n", labeled.head())
+print(f"Fetching data for {symbol} - {timeframe}")
+candles = exchange.fetch_ohlcv(symbol, timeframe, limit=500)
+df = pd.DataFrame(candles, columns=["timestamp","open","high","low","close","volume"])
+df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
-# ==== Step 3: Prepare features ====
-X = []
-y = []
+# ------------------------------
+# Features (same as predict_signal.py)
+# ------------------------------
+df["atr"] = df.apply(lambda row: atr(df), axis=1)
 
-for _, row in labeled.iterrows():
-    feats = [
-        len(row['reason']),              # reason length (proxy for complexity)
-        1 if "bullish" in row['reason'] else 0,
-        1 if "bearish" in row['reason'] else 0,
-        1 if "OB retest" in row['reason'] else 0,
-        1 if "FVG" in row['reason'] else 0,
-        1 if "liquidity" in row['reason'] else 0,
-        1 if "discount" in row['reason'] else 0,
-        1 if "premium" in row['reason'] else 0,
-    ]
-    X.append(feats)
-    y.append(row['label'])
+features = ["open", "high", "low", "close", "volume", "atr"]
+df = df.dropna()
 
-import numpy as np
-X = np.array(X)
-y = np.array(y)
+# Target bana lo (simple logic: next candle close > current close → BUY else SELL)
+df["target"] = (df["close"].shift(-1) > df["close"]).astype(int)
 
-# ==== Step 4: Train/Test Split ====
+X = df[features]
+y = df["target"]
+
+# ------------------------------
+# Train-Test Split
+# ------------------------------
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-# ==== Step 5: Train Model ====
-model = RandomForestClassifier(n_estimators=200, random_state=42)
+# ------------------------------
+# Train Model
+# ------------------------------
+print("Training model with features:", features)
+model = RandomForestClassifier(n_estimators=100, random_state=42)
 model.fit(X_train, y_train)
 
-# ==== Step 6: Evaluate ====
+# ------------------------------
+# Evaluate
+# ------------------------------
 y_pred = model.predict(X_test)
-print("Model Performance:")
-print(classification_report(y_test, y_pred))
+print("\nClassification Report:\n", classification_report(y_test, y_pred))
 
-# ==== Step 7: Save Model ====
-joblib.dump(model, "models/smc_model.pkl")
-print("✅ Model trained and saved at models/smc_model.pkl")
+# ------------------------------
+# Save Model
+# ------------------------------
+with open("models/smc_model.pkl", "wb") as f:
+    pickle.dump(model, f)
+
+print("✅ Model retrained and saved at models/smc_model.pkl with ATR feature")
+
+
