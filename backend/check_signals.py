@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timedelta
 import pandas as pd
-from typing import Optional   # ✅ Add this line
+from typing import Optional
 
 from db import SessionLocal, Signal
 import smc_filters
@@ -85,12 +85,10 @@ def confirm_htf_confluence(df_ltf: pd.DataFrame, pip_size: float = PIP_SIZE) -> 
     """
     Confirm direction with higher timeframes:
     - require 15m & 1H trend to agree with 5m signal (simple MA method).
-    df_ltf: original dataframe indexed by datetime (5m)
     """
     try:
         df_15 = smc_filters.resample_ohlcv(df_ltf, "15T")
         df_1h = smc_filters.resample_ohlcv(df_ltf, "1H")
-        # simple MA-based trend
         def trend(df):
             ma_fast = df['close'].rolling(20).mean().iloc[-1]
             ma_slow = df['close'].rolling(50).mean().iloc[-1]
@@ -104,12 +102,10 @@ def confirm_htf_confluence(df_ltf: pd.DataFrame, pip_size: float = PIP_SIZE) -> 
 
 
 # ------------------------
-# SMT Divergence helper (uses reference symbol df)
+# SMT Divergence helper
 # ------------------------
 def check_smt_divergence(primary_df: pd.DataFrame, reference_df: pd.DataFrame, lookback: int = 20) -> Optional[str]:
-    """
-    Wrapper for smc_filters.detect_smt_divergence
-    """
+    """Wrapper for smc_filters.detect_smt_divergence"""
     return smc_filters.detect_smt_divergence(primary_df, reference_df, lookback=lookback)
 
 
@@ -124,34 +120,46 @@ def run_smc_confluence(
     reference_df: Optional[pd.DataFrame] = None
 ) -> dict:
     """
-    Complete validation pipeline.
-    - candles_df: 5m candles DataFrame (datetime index)
-    - ml_signal: dict with keys: {'type': 'buy'|'sell', 'entry': float, 'stop_loss': float, 'take_profit': float, 'confidence': float}
-    - reference_df: optional other instrument dataframe to check SMT divergence
-    Returns: {"valid": bool, "reason": str, "confluences": [...], "payload": {...}}
+    Relaxed scoring-based validation pipeline (Smart Money Concept)
     """
 
     out = {"valid": False, "reason": "", "confluences": [], "payload": None}
 
-    # basic checks
     if candles_df is None or len(candles_df) < 10:
-        out['reason'] = "insufficient data"
+        out['reason'] = "insufficient_data"
         return out
 
-    # enforce timezone-naive in UTC assumed
     ts = ml_signal.get("time") or candles_df.index[-1]
     if isinstance(ts, str):
         ts = pd.to_datetime(ts)
-    if not in_killzone(ts):
-        out['reason'] = "outside_killzone"
-        return out
 
-    # impulsive move check (150+ pips)
-    if not smc_filters.is_impulsive_move(candles_df, min_points=MIN_MOVE_PIPS, pip_size=PIP_SIZE):
-        out['reason'] = "not_impulsive_move"
-        return out
+    # Start scoring
+    score = 0
+    reasons = []
+    confluences = []
 
-    # core detections
+    # ✅ Killzone (Optional)
+    if in_killzone(ts):
+        score += 1
+        confluences.append("killzone ✅ [Optional]")
+    else:
+        reasons.append("outside_killzone")
+
+    # ✅ Impulsive Move (Important)
+    if smc_filters.is_impulsive_move(candles_df, min_points=MIN_MOVE_PIPS, pip_size=PIP_SIZE):
+        score += 1
+        confluences.append("impulsive_move ✅ [Important]")
+    else:
+        reasons.append("not_impulsive_move")
+
+    # ✅ HTF Confirmation (Must-Have)
+    if confirm_htf_confluence(candles_df):
+        score += 1
+        confluences.append("htf_confluence ✅ [Must-Have]")
+    else:
+        reasons.append("htf_confluence_failed")
+
+    # ✅ FVG / OB / BOS / Mitigation / Liquidity
     order_blocks = smc_filters.detect_order_blocks(candles_df)
     bos_points = smc_filters.detect_bos(candles_df)
     fvgs = smc_filters.detect_fvg(candles_df)
@@ -160,45 +168,66 @@ def run_smc_confluence(
     breakers = smc_filters.detect_breaker_blocks(order_blocks, candles_df)
     zone, eq = smc_filters.detect_premium_discount(candles_df)
 
-    # store confluences
-    confluences = []
     if pools['highs'] or pools['lows']:
-        confluences.append("liquidity_pools")
-    if mitigations:
-        confluences.append("mitigation_blocks")
-    if breakers:
-        confluences.append("breaker_blocks")
+        score += 1
+        confluences.append("liquidity_grab ✅ [Must-Have]")
+
     if fvgs:
-        confluences.append("fvgs")
-    confluences.append(zone)  # premium/discount
+        score += 1
+        confluences.append("fvg ✅ [Important]")
 
-    # HTF confirmation
-    if not confirm_htf_confluence(candles_df):
-        out['reason'] = "htf_confluence_failed"
-        return out
+    if order_blocks:
+        score += 1
+        confluences.append("ob_rejection ✅ [Important]")
 
-    # SMT divergence check (optional) - requires reference df
+    if mitigations or breakers:
+        score += 1
+        confluences.append("mitigation/breaker ✅ [Optional]")
+
+    confluences.append(f"zone: {zone}")
+
+    # ✅ SMT Divergence (Optional)
     if reference_df is not None:
         div = check_smt_divergence(candles_df, reference_df)
         if div:
-            confluences.append(div)
+            score += 1
+            confluences.append("smt_divergence ✅ [Optional]")
 
-    # require at least 2 strong confluences (besides premium/discount)
-    strong = [c for c in confluences if c not in ("premium", "discount")]
-    if len(strong) < 1:  # require at least 1 strong confluence + zone = 2 total
-        out['reason'] = "insufficient_confluence"
-        out['confluences'] = confluences
-        return out
-
-    # verify move potential from entry to TP
+    # ✅ TP Move potential (Important)
     entry = float(ml_signal.get("entry", candles_df['close'].iloc[-1]))
     tp = float(ml_signal.get("take_profit", entry))
     move_points = abs(tp - entry) / PIP_SIZE
-    if move_points < MIN_MOVE_PIPS:
-        out['reason'] = "tp_below_min_move"
-        return out
+    if move_points >= MIN_MOVE_PIPS:
+        score += 1
+        confluences.append("tp_move_ok ✅ [Important]")
+    else:
+        reasons.append("tp_below_min_move")
 
-    # Prepare payload for save/execution
+    # ------------------------
+    # Final Classification
+    # ------------------------
+    category = "❌ REJECTED (0/5)"
+    valid = False
+
+    if score >= 5:
+        category = "💎 SUPER DUPER TRADE (5/5) ✅ Execute Confidently"
+        valid = True
+    elif score == 4:
+        category = "💎 SUPER TRADE (4/5) ✅ High-Probability Entry"
+        valid = True
+    elif score == 3:
+        category = "✅ VALID TRADE (3/5) ⚙️ Moderate Risk"
+        valid = True
+    elif score == 2:
+        category = "⚠️ WEAK TRADE (2/5) 🚫 Avoid / Demo Only"
+        valid = False
+    elif score == 1:
+        category = "❌ RECOMMENDED NO ENTRY (1/5) ❌ Skip Trade"
+        valid = False
+    else:
+        category = "❌ REJECTED (0/5) ❌ Ignore"
+        valid = False
+
     payload = {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -208,31 +237,13 @@ def run_smc_confluence(
         "take_profit": tp,
         "confidence": float(ml_signal.get("confidence", 0.0)),
         "confluences": confluences,
+        "score": score,
+        "category": category,
         "created_at": datetime.utcnow().isoformat()
     }
 
-    out['valid'] = True
-    out['reason'] = "passed"
-    out['confluences'] = confluences
-    out['payload'] = payload
+    out["valid"] = valid
+    out["reason"] = category if valid else ";".join(reasons)
+    out["confluences"] = confluences
+    out["payload"] = payload
     return out
-
-
-# ------------------------
-# Quick CLI test
-# ------------------------
-if __name__ == "__main__":
-    # simple example to test integration
-    import numpy as np
-    rng = pd.date_range(end=pd.Timestamp.utcnow(), periods=200, freq="5T")
-    # create synthetic candles with a big recent range
-    highs = np.linspace(50000, 50250, len(rng)) + np.random.rand(len(rng))*10
-    lows = highs - (np.random.rand(len(rng))*20 + 10)
-    opens = highs - (highs - lows) * 0.6
-    closes = lows + (highs - lows) * 0.6
-    df = pd.DataFrame({"open": opens, "high": highs, "low": lows, "close": closes, "volume": 1}, index=rng)
-
-    ml_signal = {"type": "buy", "entry": float(df['close'].iloc[-1]), "stop_loss": float(df['low'].iloc[-1]), "take_profit": float(df['close'].iloc[-1]) + 200, "confidence": 0.8, "time": df.index[-1]}
-
-    result = run_smc_confluence(df, "BTC/USDT", "5m", ml_signal)
-    print("RESULT:", result)

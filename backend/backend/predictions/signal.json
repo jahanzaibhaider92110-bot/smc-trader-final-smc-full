@@ -1,9 +1,0 @@
-{
-  "symbol": "BTCUSDT",
-  "side": "BUY",
-  "entry": 119029.58,
-  "stop_loss": 118879.76,
-  "take_profit": 119329.22,
-  "confidence": 0.85,
-  "timestamp": "2025-10-02T12:29:47.622236"
-}
